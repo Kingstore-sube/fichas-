@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Admin · Casino</title>
+<style>
+*{box-sizing:border-box}body{margin:0;font:15px system-ui,sans-serif;background:#0b0b10;color:#eee;padding:16px}
+.w{max-width:640px;margin:0 auto}h1{font-size:20px}h2{font-size:16px;margin:18px 0 8px}
+.c{background:#16161f;border:1px solid #2a2a38;border-radius:12px;padding:14px;margin-bottom:14px}
+input{width:100%;padding:10px;border-radius:8px;border:1px solid #3a3a4a;background:#0e0e15;color:#fff;margin:4px 0 8px}
+button{padding:10px 14px;border:0;border-radius:8px;background:#27d860;color:#000;font-weight:700;cursor:pointer;margin-right:6px}
+button.r{background:#ff5c5c}button.g{background:#444;color:#fff}
+.m{font-size:13px;color:#aaa;word-break:break-all}.ok{color:#3cf084}.er{color:#ff7777}
+table{width:100%;border-collapse:collapse;font-size:13px}td,th{padding:6px;border-bottom:1px solid #2a2a38;text-align:left}
+.hide{display:none}
+</style></head><body><div class="w">
+<h1>Panel de administrador <small style="font-size:11px;color:#777">v4</small></h1>
+<div id="msg" class="m"></div>
+
+<div id="login" class="c">
+  <h2>Ingresar</h2>
+  <input id="pw" type="password" placeholder="Contraseña de administrador" autofocus>
+  <button id="go">Entrar</button>
+</div>
+
+<div id="panel" class="hide">
+  <div class="c"><span id="who" class="m"></span> <button class="g" id="out">Salir</button></div>
+
+  <div class="c"><h2>Solicitudes de recarga</h2><div id="reqs" class="m">Cargando...</div></div>
+
+  <div class="c">
+    <h2>Buscar jugador</h2>
+    <input id="q" placeholder="Pega el ID del usuario (o su correo)">
+    <button id="find">Buscar</button>
+    <div id="user" class="hide" style="margin-top:12px">
+      <div><b id="uName"></b> <span class="m" id="uMail"></span></div>
+      <div class="m" id="uId"></div>
+      <div style="font-size:22px;margin:8px 0">Saldo: <b id="uBal"></b></div>
+      <input id="amt" type="number" min="1" step="1" placeholder="Monto de fichas">
+      <input id="note" placeholder="Nota (opcional)">
+      <button id="add">+ Sumar</button><button id="sub" class="r">− Restar</button><button id="set" class="g">Fijar saldo</button>
+    </div>
+  </div>
+
+  <div class="c"><h2>Últimas recargas</h2><table id="log"><tr><th>Fecha</th><th>Jugador</th><th>Monto</th></tr></table></div>
+</div>
+
+<script type="module">
+import {initializeApp} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+import {initializeAuth,inMemoryPersistence,signInWithEmailAndPassword,signOut,onAuthStateChanged} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+import {initializeFirestore,doc,getDoc,getDocs,collection,query,where,limit,orderBy,runTransaction,addDoc,serverTimestamp} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+const app=initializeApp({apiKey:"AIzaSyBV2JFaqnqpknFRg9O5EzCdesnxZ74g8E0",authDomain:"casino-94e66.firebaseapp.com",projectId:"casino-94e66",storageBucket:"casino-94e66.firebasestorage.app",messagingSenderId:"929289507206",appId:"1:929289507206:web:a05029e32c503bc5711c07"});
+const auth=initializeAuth(app,{persistence:inMemoryPersistence}),db=initializeFirestore(app,{experimentalForceLongPolling:true,useFetchStreams:false}),$=id=>document.getElementById(id);
+let cur=null,me=null;
+const say=(t,ok)=>{$('msg').textContent=t;$('msg').className='m '+(ok?'ok':'er')};
+const fmt=n=>Number(n).toLocaleString('es-CO');
+
+const ADMIN_EMAIL='haydergarcia67@gmail.com';
+$('go').onclick=async()=>{
+  if(!$('pw').value){say('Escribe la contraseña.');return}
+  say('Entrando...',true);
+  try{await Promise.race([signInWithEmailAndPassword(auth,ADMIN_EMAIL,$('pw').value),new Promise((_,r)=>setTimeout(()=>r({code:'sin-respuesta (internet lento)'}),20000))])}
+  catch(e){say(e.code==='auth/invalid-credential'||e.code==='auth/wrong-password'||e.code==='auth/user-not-found'?'Contraseña incorrecta (o el usuario admin no existe en Firebase).':'No se pudo entrar: '+e.code)}
+};
+$('pw').addEventListener('keydown',e=>{if(e.key==='Enter')$('go').click()});
+$('out').onclick=()=>signOut(auth);
+onAuthStateChanged(auth,async u=>{
+  me=u;$('user').classList.add('hide');cur=null;
+  if(!u){$('login').classList.remove('hide');$('panel').classList.add('hide');return}
+  say('Verificando permisos...',true);
+  let ok=false,err='';
+  try{ok=(await Promise.race([getDoc(doc(db,'admins',u.uid)),new Promise((_,r)=>setTimeout(()=>r({code:'timeout'}),15000))])).exists()}catch(e){err=e.code||String(e)}
+  if(err){say('No se pudo verificar el admin ('+err+'). Revisa tu internet o las reglas de Firestore.');await signOut(auth);return}
+  if(!ok){say('Esta cuenta no es administrador (el ID en admins no coincide con tu UID: '+u.uid+').');await signOut(auth);return}
+  say('');$('login').classList.add('hide');$('panel').classList.remove('hide');$('who').textContent='Admin: '+u.email;loadLog();loadReqs();
+});
+
+async function find(){
+  const t=$('q').value.trim();if(!t)return;
+  let snap=null;
+  try{
+    if(t.includes('@')){const r=await getDocs(query(collection(db,'users'),where('email','==',t.toLowerCase()),limit(1)));if(!r.empty)snap=r.docs[0]}
+    else{const d=await getDoc(doc(db,'users',t));if(d.exists())snap=d}
+  }catch(e){say('Error: '+e.code);return}
+  if(!snap){say('Usuario no encontrado.');$('user').classList.add('hide');cur=null;return}
+  cur=snap.id;show(snap.data());say('');
+}
+function show(d){$('user').classList.remove('hide');$('uName').textContent=d.name||'(sin nombre)';$('uMail').textContent=d.email||'';$('uId').textContent='ID: '+cur;$('uBal').textContent=fmt(d.balance|0)}
+$('find').onclick=find;$('q').onkeydown=e=>{if(e.key==='Enter')find()};
+
+async function change(mode){
+  const n=parseInt($('amt').value,10);
+  if(!cur||!(n>=0)||(mode!=='set'&&n<1)){say('Escribe un monto válido.');return}
+  const ref=doc(db,'users',cur);
+  try{
+    const res=await runTransaction(db,async tx=>{
+      const s=await tx.get(ref);if(!s.exists())throw new Error('no existe');
+      const b=s.data().balance|0;
+      const nb=mode==='add'?b+n:mode==='sub'?b-n:n;
+      if(nb<0)throw new Error('El saldo no puede quedar negativo');
+      tx.update(ref,{balance:nb,updatedAt:serverTimestamp()});
+      return {before:b,after:nb,email:s.data().email||''};
+    });
+    await addDoc(collection(db,'recharges'),{uid:cur,email:res.email,mode,amount:n,before:res.before,after:res.after,note:$('note').value.trim(),admin:me.email,at:serverTimestamp()});
+    $('uBal').textContent=fmt(res.after);$('amt').value='';$('note').value='';
+    say('Listo. Saldo: '+fmt(res.before)+' → '+fmt(res.after),true);loadLog();
+  }catch(e){say(e.message||e.code)}
+}
+$('add').onclick=()=>change('add');$('sub').onclick=()=>change('sub');$('set').onclick=()=>change('set');
+
+async function loadReqs(){
+  const box=$('reqs');
+  try{
+    const r=await getDocs(query(collection(db,'rechargeRequests'),where('status','==','pending'),limit(50)));
+    const rows=r.docs.map(x=>({id:x.id,...x.data()})).sort((p,q)=>(p.createdAt?.seconds||0)-(q.createdAt?.seconds||0));
+    if(!rows.length){box.textContent='No hay solicitudes pendientes.';return}
+    const esc=t=>String(t==null?'':t).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+    box.innerHTML=rows.map(d=>`<div style="border-top:1px solid #333;padding:10px 0">
+      <b>${esc(d.name)}</b> · <span class="ok">${fmt(d.amount)}</span><br>
+      <span class="m">Tel: ${esc(d.phone)} · ${esc(d.email)}</span><br>
+      <span class="m">${d.createdAt?d.createdAt.toDate().toLocaleString('es-CO'):''}</span><br>
+      <button data-a="ok" data-id="${esc(d.id)}">Acreditar</button><button class="r" data-a="no" data-id="${esc(d.id)}">Rechazar</button></div>`).join('');
+    box.querySelectorAll('button').forEach(b=>b.onclick=()=>resolveReq(b.dataset.id,b.dataset.a==='ok'));
+  }catch(e){box.textContent='No se pudieron cargar las solicitudes ('+(e.code||e.message)+').'}
+}
+async function resolveReq(id,accept){
+  if(accept&&!confirm('¿Acreditar esta recarga al jugador?'))return;
+  const rref=doc(db,'rechargeRequests',id);
+  try{
+    const res=await runTransaction(db,async tx=>{
+      const rs=await tx.get(rref);if(!rs.exists())throw new Error('La solicitud no existe');
+      const q=rs.data();if(q.status!=='pending')throw new Error('Esa solicitud ya fue atendida');
+      if(!accept){tx.update(rref,{status:'rejected',doneAt:serverTimestamp(),doneBy:me.email});return null}
+      const uref=doc(db,'users',q.uid),us=await tx.get(uref);if(!us.exists())throw new Error('El jugador no existe');
+      const b=us.data().balance|0,nb=b+q.amount;
+      tx.update(uref,{balance:nb,updatedAt:serverTimestamp()});
+      tx.update(rref,{status:'done',doneAt:serverTimestamp(),doneBy:me.email});
+      return {uid:q.uid,email:q.email||us.data().email||'',amount:q.amount,before:b,after:nb};
+    });
+    if(res)await addDoc(collection(db,'recharges'),{uid:res.uid,email:res.email,mode:'add',amount:res.amount,before:res.before,after:res.after,note:'Solicitud de recarga',admin:me.email,at:serverTimestamp()});
+    say(accept?'Recarga acreditada.':'Solicitud rechazada.',true);loadReqs();loadLog();
+  }catch(e){say(e.message||e.code)}
+}
+
+async function loadLog(){
+  try{
+    const r=await getDocs(query(collection(db,'recharges'),orderBy('at','desc'),limit(20)));
+    $('log').innerHTML='<tr><th>Fecha</th><th>Jugador</th><th>Cambio</th></tr>'+r.docs.map(x=>{const d=x.data();
+      const f=d.at?d.at.toDate().toLocaleString('es-CO'):'';const sign=d.mode==='add'?'+':d.mode==='sub'?'−':'=';
+      return `<tr><td>${f}</td><td>${(d.email||d.uid).replace(/</g,'&lt;')}</td><td>${sign}${fmt(d.amount)} → ${fmt(d.after)}</td></tr>`}).join('');
+  }catch(e){}
+}
+</script></div></body></html>
