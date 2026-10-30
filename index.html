@@ -40,13 +40,21 @@ table{width:100%;border-collapse:collapse;font-size:13px}td,th{padding:6px;borde
     </div>
   </div>
 
+  <div class="c"><h2>Mesas de Veintiuno</h2>
+    <div style="font-size:22px">Ganancias de la casa: <b class="ok" id="hRake">0</b></div>
+    <div class="m" id="hTables">0 mesas jugadas</div>
+    <div style="margin-top:10px" class="m">Porcentaje que te quedas por mesa (sobre el pozo):</div>
+    <input id="hPct" type="number" min="0" max="50" step="1" placeholder="10">
+    <button id="hSave">Guardar porcentaje</button>
+  </div>
+
   <div class="c"><h2>Últimas recargas</h2><table id="log"><tr><th>Fecha</th><th>Jugador</th><th>Monto</th></tr></table></div>
 </div>
 
 <script type="module">
 import {initializeApp} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
 import {initializeAuth,inMemoryPersistence,signInWithEmailAndPassword,signOut,onAuthStateChanged} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
-import {initializeFirestore,doc,getDoc,getDocs,collection,query,where,limit,orderBy,runTransaction,addDoc,serverTimestamp} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import {initializeFirestore,doc,getDoc,getDocs,collection,query,where,limit,orderBy,runTransaction,addDoc,serverTimestamp,setDoc} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 const app=initializeApp({apiKey:"AIzaSyBV2JFaqnqpknFRg9O5EzCdesnxZ74g8E0",authDomain:"casino-94e66.firebaseapp.com",projectId:"casino-94e66",storageBucket:"casino-94e66.firebasestorage.app",messagingSenderId:"929289507206",appId:"1:929289507206:web:a05029e32c503bc5711c07"});
 const auth=initializeAuth(app,{persistence:inMemoryPersistence}),db=initializeFirestore(app,{experimentalForceLongPolling:true,useFetchStreams:false}),$=id=>document.getElementById(id);
 let cur=null,me=null;
@@ -70,7 +78,7 @@ onAuthStateChanged(auth,async u=>{
   try{ok=(await Promise.race([getDoc(doc(db,'admins',u.uid)),new Promise((_,r)=>setTimeout(()=>r({code:'timeout'}),15000))])).exists()}catch(e){err=e.code||String(e)}
   if(err){say('No se pudo verificar el admin ('+err+'). Revisa tu internet o las reglas de Firestore.');await signOut(auth);return}
   if(!ok){say('Esta cuenta no es administrador (el ID en admins no coincide con tu UID: '+u.uid+').');await signOut(auth);return}
-  say('');$('login').classList.add('hide');$('panel').classList.remove('hide');$('who').textContent='Admin: '+u.email;loadLog();loadReqs();
+  say('');$('login').classList.add('hide');$('panel').classList.remove('hide');$('who').textContent='Admin: '+u.email;loadLog();loadReqs();loadHouse();
 });
 
 async function find(){
@@ -140,6 +148,20 @@ async function resolveReq(id,accept){
   }catch(e){say(e.message||e.code)}
 }
 
+async function loadHouse(){
+  try{
+    const st=await getDoc(doc(db,'house','stats')),cf=await getDoc(doc(db,'house','config'));
+    const d=st.exists()?st.data():{};
+    $('hRake').textContent=fmt(d.rake|0);$('hTables').textContent=(d.tables|0)+' mesas jugadas con ganador';
+    $('hPct').value=cf.exists()&&cf.data().rakePct!=null?cf.data().rakePct:10;
+  }catch(e){$('hTables').textContent='No se pudo cargar ('+(e.code||e.message)+')'}
+}
+$('hSave').onclick=async()=>{
+  const p=parseInt($('hPct').value,10);
+  if(!(p>=0&&p<=50)){say('El porcentaje debe estar entre 0 y 50.');return}
+  try{await setDoc(doc(db,'house','config'),{rakePct:p},{merge:true});say('Porcentaje guardado: '+p+'%. Aplica a las mesas nuevas.',true);loadHouse()}
+  catch(e){say(e.code||e.message)}
+};
 async function loadLog(){
   try{
     const r=await getDocs(query(collection(db,'recharges'),orderBy('at','desc'),limit(20)));
